@@ -40,6 +40,8 @@ import org.apache.ignite.configuration.CacheConfiguration;
 import org.apache.ignite.lang.IgniteBiPredicate;
 import org.apache.ignite.ml.Model;
 import org.apache.ignite.ml.environment.LearningEnvironment;
+import org.apache.ignite.ml.environment.logging.ConsoleLogger;
+import org.apache.ignite.ml.environment.logging.MLLogger;
 import org.apache.ignite.ml.environment.parallelism.ParallelismStrategy;
 import org.apache.ignite.ml.math.Vector;
 import org.apache.ignite.ml.math.VectorUtils;
@@ -232,6 +234,7 @@ public class Main {
             DatasetTrainer<? extends Model<Vector, Double>, Double> trainer = createTrainer(trainerName);
             trainer.setEnvironment(LearningEnvironment.builder()
                 .withParallelismStrategy(ParallelismStrategy.Type.ON_DEFAULT_POOL)
+                .withLoggingFactory(ConsoleLogger.factory(MLLogger.VerboseLevel.MID))
                 .build());
 
             for (double partSize = args.sampleStartSize;
