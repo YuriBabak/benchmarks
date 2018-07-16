@@ -276,7 +276,7 @@ public class Main {
             case "dt":
                 return new DecisionTreeClassificationTrainer(10, 0.0);
             case "bst":
-                return new GDBBinaryClassifierOnTreesTrainer(1.0, 1000, 3, 0.0);
+                return new GDBBinaryClassifierOnTreesTrainer(1.0, 500, 1, 0.0);
             case "svm":
                 return new SVMLinearBinaryClassificationTrainer();
             default:
@@ -315,8 +315,9 @@ public class Main {
 
     private static IgniteBiPredicate<Integer, VectorWithAswer> createFilter(double size, long seed, boolean isTrain) {
         Random rnd = new Random(seed);
+        Random shaRandom = new Random(rnd.nextInt());
         SHA256UniformMapper<Integer, VectorWithAswer> sampleFilter = new SHA256UniformMapper<>(rnd);
-        TrainTestSplit<Integer, VectorWithAswer> split = new TrainTestDatasetSplitter<Integer, VectorWithAswer>()
+        TrainTestSplit<Integer, VectorWithAswer> split = new TrainTestDatasetSplitter<Integer, VectorWithAswer>(new SHA256UniformMapper<>(shaRandom))
             .split(0.667);
 
         IgniteBiPredicate<Integer, VectorWithAswer> splitFilter = isTrain ? split.getTrainFilter() : split.getTestFilter();
