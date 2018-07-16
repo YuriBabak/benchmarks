@@ -19,20 +19,16 @@ package org.apache.ignite.benchmark;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
-import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -41,68 +37,110 @@ import org.apache.ignite.IgniteCache;
 import org.apache.ignite.Ignition;
 import org.apache.ignite.cache.affinity.rendezvous.RendezvousAffinityFunction;
 import org.apache.ignite.configuration.CacheConfiguration;
-import org.apache.ignite.configuration.IgniteConfiguration;
+import org.apache.ignite.lang.IgniteBiPredicate;
 import org.apache.ignite.ml.Model;
+import org.apache.ignite.ml.environment.LearningEnvironment;
+import org.apache.ignite.ml.environment.parallelism.ParallelismStrategy;
 import org.apache.ignite.ml.math.Vector;
 import org.apache.ignite.ml.math.VectorUtils;
+import org.apache.ignite.ml.selection.scoring.evaluator.Evaluator;
+import org.apache.ignite.ml.selection.scoring.metric.Accuracy;
+import org.apache.ignite.ml.selection.split.TrainTestDatasetSplitter;
+import org.apache.ignite.ml.selection.split.TrainTestSplit;
 import org.apache.ignite.ml.selection.split.mapper.SHA256UniformMapper;
 import org.apache.ignite.ml.svm.SVMLinearBinaryClassificationTrainer;
 import org.apache.ignite.ml.trainers.DatasetTrainer;
 import org.apache.ignite.ml.tree.DecisionTreeClassificationTrainer;
 import org.apache.ignite.ml.tree.boosting.GDBBinaryClassifierOnTreesTrainer;
 import org.apache.ignite.ml.tree.randomforest.RandomForestClassifierTrainer;
-import org.apache.ignite.spi.discovery.tcp.TcpDiscoverySpi;
-import org.apache.ignite.spi.discovery.tcp.ipfinder.vm.TcpDiscoveryVmIpFinder;
 
+/**
+ * Running examples:
+ * nohup /usr/lib/jvm/java-8-oracle/bin/java -jar main.jar --dataset homecredit_top10k.csv --cache-name HOMECREDIT --trainers svm,dt -p ignite -m server --config-path server.xml &> server.log &
+ * /usr/lib/jvm/java-8-oracle/bin/java -jar main.jar --dataset homecredit_top10k.csv --cache-name HOMECREDIT --trainers svm,dt -p ignite -m client --config-path client.xml
+ */
 public class Main {
     private static Set<String> algorithms = Stream.of("rf", "dt", "svm", "bst", "nn").collect(Collectors.toSet());
     private static final long COUNT_OF_ESTIMATIONS_PER_CASE = 3;
 
     public static class Args {
-        /** Sample path. */
-        @Parameter(names = {"--dataset"}, description = "path to dataset in csv format")
+        /** Spring configuration path. */
+        @Parameter(names = {"--config-path"}, required = true)
+        public String configurationPath;
+
+        /** Path to binary classification dataset in csv format. */
+        @Parameter(names = {"--dataset", "-i"},
+            required = true,
+            description = "path to binary classification dataset in csv format")
         private String samplePath = "";
 
         /** Cache name. */
         @Parameter(names = {"--cache-name"})
-        private String cacheName = "";
+        private String cacheName = "IGNITE_CACHE_NAME";
 
-        @Parameter(names = {"--sample-min-part-size"})
-        private double sampleMinPartSize = 0.1;
+        /** Sample start size in percents of original sample size. */
+        @Parameter(names = {"--sample-start-size"},
+            description = "Sample start size in percents of original sample size")
+        private double sampleStartSize = 0.1;
 
-        @Parameter(names = {"--sample-max-part-size"})
-        private double sampleMaxPartSize = 1.0;
+        /** Sample end size  in percents of original sample size. */
+        @Parameter(names = {"--sample-end-size"},
+            description = "Sample end size  in percents of original sample size")
+        private double sampleEndSize = 1.0;
 
-        @Parameter(names = {"--sample-part-size-step"})
-        private double samplePartSizeStep = 0.1;
+        /** Sample partition size will be increased by this value in each iteration. */
+        @Parameter(names = {"--sample-size-step"},
+            description = "Sample partition size will be increased by this value in each iteration")
+        private double sampleSizeStep = 0.1;
 
-        @Parameter(names = {"--trainers"}, description = "list of values from set [rf, svm, dt, bst]")
+        /** List of trainer names. */
+        @Parameter(names = {"--trainers", "-t"},
+            description = "list of values from set [rf, svm, dt, bst]")
         private List<String> trainers = Collections.singletonList("rf");
 
-        @Parameter(names = {"--ip-pool"})
-        private List<String> ipPool = Collections.singletonList("127.0.0.1:47500..47509");
-
-        @Parameter(names = {"--seed"})
+        /** Random seed. */
+        @Parameter(names = {"--seed", "-s"}, description = "seed of random generator")
         private Long seed = System.currentTimeMillis();
 
-        @Parameter(names = {"--out"})
-        private String outFileName = "timings.csv";
+        /** Output file prefix. */
+        @Parameter(names = {"--output-file-prefix", "-p"},
+            description = "prefix of output file names")
+        private String outputFilePrefix = "ignite";
+
+        /** Configuration name. */
+        @Parameter(names = {"--configuration", "-c"},
+            description = "Optional configuration name, it can has values from set: [min, max]. " +
+                "\"min\" cofiguration corresponds to [sample-start-size=0.01, sample-end-size=0.1, step=0.01], " +
+                "\"max\" cofiguration corresponds to [sample-start-size=0.1, sample-end-size=1.0, step=0.1]. " +
+                "If configuration name is not set, then --sample-start-size, --sample-end-size, --sample-size-step will be used.",
+            required = false)
+        private String configurationName = "";
+
+        @Parameter(names = {"--mode", "-m"}, description = "benchmark tool mode [client or server]", required = true)
+        private String mode = "client";
+
+        @Parameter(names = {"--help", "-h"}, help = true)
+        private boolean help = false;
     }
 
     private static Ignite igniteInstance;
 
     public static void main(String[] argsList) {
-        Args args = new Args();
-        JCommander.newBuilder()
-            .addObject(args).build()
-            .parse(argsList);
-        normalizeArgs(args);
+        parseArgs(argsList).ifPresent(args -> {
+            if (args.mode.equalsIgnoreCase("client"))
+                startClient(args);
+            else
+                startServer(args);
+        });
+    }
 
-        try (Ignite ignite = Ignition.start(fillConfig(args))) {
+    private static void startClient(Args args) {
+        try (Ignite ignite = Ignition.start(args.configurationPath)) {
+            System.out.println(">>>>>>>>>>>>>>>>>>>>>>>>> CLIENT MODE");
             igniteInstance = ignite;
             tryDestroyCache(args, ignite);
             IgniteCache<Integer, VectorWithAswer> trainset = fillCache(args, ignite);
-            startBenckmark(args, trainset);
+            startBenchmark(args, trainset);
         }
         catch (Exception e) {
             e.printStackTrace();
@@ -110,28 +148,53 @@ public class Main {
         }
     }
 
-    private static void normalizeArgs(Args args) {
-        args.sampleMinPartSize = Math.max(0.0, Math.min(1.0, args.sampleMinPartSize));
-        args.sampleMaxPartSize = Math.min(1.0, Math.max(0.0, args.sampleMaxPartSize));
-        args.samplePartSizeStep = Math.max(0.01, Math.min(0.99, args.samplePartSizeStep));
-
-        if (args.trainers.isEmpty())
-            throw new IllegalArgumentException("Traniners list cannot be empty");
-        args.trainers = args.trainers.stream().filter(x -> algorithms.contains(x)).collect(Collectors.toList());
+    private static void startServer(Args args) {
+        try {
+            System.out.println(">>>>>>>>>>>>>>>>>>>>>>>>> SERVER MODE");
+            Ignition.start(args.configurationPath);
+        }
+        catch (Exception e) {
+            e.printStackTrace();
+            System.exit(-1);
+        }
     }
 
-    private static IgniteConfiguration fillConfig(Args args) {
-        IgniteConfiguration config = new IgniteConfiguration();
-        TcpDiscoverySpi spi = new TcpDiscoverySpi();
+    private static Optional<Args> parseArgs(String[] argsList) {
+        Args args = new Args();
+        JCommander jCommander = JCommander.newBuilder()
+            .addObject(args).build();
+        jCommander.parse(argsList);
+        if (args.help) {
+            jCommander.usage();
+            return Optional.empty();
+        }
 
-        TcpDiscoveryVmIpFinder finder = new TcpDiscoveryVmIpFinder();
-        finder.setAddresses(args.ipPool);
+        normalizeArgs(args);
+        return Optional.of(args);
+    }
 
-        spi.setIpFinder(finder);
-        config.setDiscoverySpi(spi);
-        config.setClientMode(false);
+    private static void normalizeArgs(Args args) {
+        if (args.trainers.isEmpty())
+            throw new IllegalArgumentException("Trainers list cannot be empty");
+        args.trainers = args.trainers.stream().filter(x -> algorithms.contains(x)).collect(Collectors.toList());
 
-        return config;
+        switch (args.configurationName) {
+            case "":
+                args.sampleStartSize = Math.max(0.0, Math.min(1.0, args.sampleStartSize));
+                args.sampleEndSize = Math.min(1.0, Math.max(0.0, args.sampleEndSize));
+                args.sampleSizeStep = Math.max(0.01, Math.min(0.99, args.sampleSizeStep));
+                break;
+            case "min":
+                args.sampleStartSize = 0.01;
+                args.sampleEndSize = 0.1;
+                args.sampleSizeStep = 0.01;
+                break;
+            case "max":
+                args.sampleStartSize = 0.1;
+                args.sampleEndSize = 1.0;
+                args.sampleSizeStep = 0.1;
+                break;
+        }
     }
 
     private static void tryDestroyCache(Args args, Ignite ignite) {
@@ -159,23 +222,44 @@ public class Main {
         return cache;
     }
 
-    private static void startBenckmark(Args args, IgniteCache<Integer, VectorWithAswer> trainset) {
+    private static void startBenchmark(Args args, IgniteCache<Integer, VectorWithAswer> trainset) {
         System.out.println(">>>>>>>>>>>>>>>>>>>>>> START BENCHMARK");
-        printHeader(args);
-        for(String trainerName : args.trainers) {
+
+        for (String trainerName : args.trainers) {
+            String outputFile = args.outputFilePrefix + "_" + trainerName + ".csv";
+            printHeader(outputFile);
+
             DatasetTrainer<? extends Model<Vector, Double>, Double> trainer = createTrainer(trainerName);
-            for(double partSize = args.sampleMinPartSize;
-                partSize <= args.sampleMaxPartSize;
-                partSize += args.samplePartSizeStep) {
+            trainer.setEnvironment(LearningEnvironment.builder()
+                .withParallelismStrategy(ParallelismStrategy.Type.ON_DEFAULT_POOL)
+                .build());
+
+            for (double partSize = args.sampleStartSize;
+                partSize <= args.sampleEndSize;
+                partSize += args.sampleSizeStep) {
 
                 long delta = 0L;
-                for(int i = 0; i < COUNT_OF_ESTIMATIONS_PER_CASE; i++)
-                    delta += estimateTs(trainer, trainset, partSize, args);
+                double accuracy = 0.0;
+                int retriesCount = 0;
+                for (int i = 0; i < COUNT_OF_ESTIMATIONS_PER_CASE; i++) {
+                    if(retriesCount > 5)
+                        throw new RuntimeException("Retries limit has exceeded");
+
+                    try {
+                        EstimationPair estimation = estimateModel(trainer, trainset, partSize, args);
+                        delta += estimation.time;
+                        accuracy += estimation.accuracy;
+                    } catch (RuntimeException e) {
+                        e.printStackTrace();
+                        i--;
+                        retriesCount++;
+                    }
+                }
                 delta /= COUNT_OF_ESTIMATIONS_PER_CASE;
+                accuracy /= COUNT_OF_ESTIMATIONS_PER_CASE;
 
-                printEstimationResult(partSize, args, trainerName, delta);
+                printEstimationResult(outputFile, partSize, trainerName, delta, accuracy);
             }
-
         }
 
         System.out.println(">>>>>>>>>>>>>>>>>>>>>> DONE");
@@ -200,42 +284,73 @@ public class Main {
         }
     }
 
-    private static long estimateTs(DatasetTrainer<? extends Model<Vector, Double>, Double> trainer,
+    private static EstimationPair estimateModel(DatasetTrainer<? extends Model<Vector, Double>, Double> trainer,
         IgniteCache<Integer, VectorWithAswer> trainset,
         double size, Args args) {
 
         String trainerName = trainer.getClass().getSimpleName();
         System.out.println(String.format(">>>>>>>>>>>>>>>>>>>>>> START LEARNING of %s [part size = %.4f]", trainerName, size));
-        Random rnd = new Random(args.seed);
-        SHA256UniformMapper<Integer, VectorWithAswer> sampleFilter = new SHA256UniformMapper<>(rnd);
+
         long startTime = System.currentTimeMillis();
-        trainer.fit(
+        Model<Vector, Double> model = trainer.fit(
             igniteInstance,
             trainset,
-            (k,v) -> sampleFilter.map(k,v) < size,
-            (k,v) -> v.features(),
-            (k,v) -> v.answer()
+            createFilter(size, args.seed, true),
+            (k, v) -> v.features(),
+            (k, v) -> v.answer()
+        );
+        long timeDelta = System.currentTimeMillis() - startTime;
+
+        double accuracy = Evaluator.evaluate(
+            trainset,
+            createFilter(size, args.seed, false),
+            model,
+            (k, v) -> v.features(),
+            (k, v) -> v.answer(),
+            new Accuracy<>()
         );
 
-        return System.currentTimeMillis() - startTime;
+        return new EstimationPair(timeDelta, accuracy);
     }
 
-    private static void printHeader(Args args) {
-        try(FileOutputStream fos = new FileOutputStream(args.outFileName, false);
-            PrintWriter printer = new PrintWriter(fos)) {
+    private static IgniteBiPredicate<Integer, VectorWithAswer> createFilter(double size, long seed, boolean isTrain) {
+        Random rnd = new Random(seed);
+        SHA256UniformMapper<Integer, VectorWithAswer> sampleFilter = new SHA256UniformMapper<>(rnd);
+        TrainTestSplit<Integer, VectorWithAswer> split = new TrainTestDatasetSplitter<Integer, VectorWithAswer>()
+            .split(0.667);
 
-            printer.println("trainer\ttime_delta_in_ms\tpart_size");
-        } catch (IOException e) {
+        IgniteBiPredicate<Integer, VectorWithAswer> splitFilter = isTrain ? split.getTrainFilter() : split.getTestFilter();
+        return (k,v) -> sampleFilter.map(k,v) < size && splitFilter.apply(k,v);
+    }
+
+    private static class EstimationPair {
+        public final long time;
+        public final double accuracy;
+
+        public EstimationPair(long time, double accuracy) {
+            this.time = time;
+            this.accuracy = accuracy;
+        }
+    }
+
+    private static void printHeader(String outputFilename) {
+        try (FileOutputStream fos = new FileOutputStream(outputFilename, false);
+             PrintWriter printer = new PrintWriter(fos)) {
+
+            printer.println("trainer\ttime_delta_in_ms\tpart_size\taccuracy");
+        }
+        catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    private static void printEstimationResult(double size, Args args, String trainerName, long timeDelta) {
-        try(FileOutputStream fos = new FileOutputStream(args.outFileName, true);
-            PrintWriter printer = new PrintWriter(fos)) {
+    private static void printEstimationResult(String outputFilename, double size, String trainerName, long timeDelta, double accuracy) {
+        try (FileOutputStream fos = new FileOutputStream(outputFilename, true);
+             PrintWriter printer = new PrintWriter(fos)) {
 
-            printer.println(String.format("%s\t%d\t%.4f", trainerName, timeDelta, size));
-        } catch (IOException e) {
+            printer.println(String.format("%s\t%d\t%.4f\t%.4f", trainerName, timeDelta, size, accuracy));
+        }
+        catch (IOException e) {
             System.out.println(String.format(
                 "EXCEPTION: %s [delta time = %d ms on %s with size of set = %.4f]",
                 e.getMessage(),
