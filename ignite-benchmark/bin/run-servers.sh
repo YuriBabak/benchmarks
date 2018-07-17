@@ -2,9 +2,8 @@ set -e
 source settings.sh
 
 for SERVER in $(cat $SERVERS_FILE); do \
-ssh aplatonov@$SERVER "bash -c '(nohup $JAVA \
+ssh -v aplatonov@$SERVER "bash -c '(nohup $JAVA -ea \
 -jar $WORKDIR/main.jar \
--ea \
 --dataset $WORKDIR/homecredit_top10k.csv \
 --cache-name HOMECREDIT \
 --trainers rf -p ignite \
