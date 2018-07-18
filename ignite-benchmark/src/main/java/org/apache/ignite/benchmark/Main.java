@@ -25,6 +25,7 @@ import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
@@ -218,10 +219,14 @@ public class Main {
 
         AtomicInteger counter = new AtomicInteger(0);
         try {
-            Files.lines(Paths.get(args.samplePath)).skip(1).forEach(line -> {
+            Iterator<String> iter = Files.lines(Paths.get(args.samplePath)).iterator();
+            while (iter.hasNext()) {
+                String line = iter.next();
                 if(counter.get() <= fraction * sampleSize)
                     cache.put(counter.getAndIncrement(), new VectorWithAswer(line));
-            });
+                else
+                    break;
+            }
         }
         catch (IOException e) {
             e.printStackTrace();
@@ -287,6 +292,7 @@ public class Main {
         } catch (IOException e) {
             e.printStackTrace();
             System.exit(-1);
+            return -1;
         }
     }
 
@@ -294,7 +300,7 @@ public class Main {
         switch (name) {
             case "rf":
                 return new RandomForestClassifierTrainer(
-                    900, 5,
+                    900, 30,
                     1000, 0.1, 3,
                     0.0
                 );
