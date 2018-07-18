@@ -25,6 +25,7 @@ import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
@@ -57,9 +58,10 @@ import org.apache.ignite.ml.tree.boosting.GDBBinaryClassifierOnTreesTrainer;
 import org.apache.ignite.ml.tree.randomforest.RandomForestClassifierTrainer;
 
 /**
- * Running examples:
- * nohup /usr/lib/jvm/java-8-oracle/bin/java -jar main.jar --dataset homecredit_top10k.csv --cache-name HOMECREDIT --trainers svm,dt -p ignite -m server --config-path server.xml &> server.log &
- * /usr/lib/jvm/java-8-oracle/bin/java -jar main.jar --dataset homecredit_top10k.csv --cache-name HOMECREDIT --trainers svm,dt -p ignite -m client --config-path client.xml
+ * Running examples: nohup /usr/lib/jvm/java-8-oracle/bin/java -jar main.jar --dataset homecredit_top10k.csv
+ * --cache-name HOMECREDIT --trainers svm,dt -p ignite -m server --config-path server.xml &> server.log &
+ * /usr/lib/jvm/java-8-oracle/bin/java -jar main.jar --dataset homecredit_top10k.csv --cache-name HOMECREDIT --trainers
+ * svm,dt -p ignite -m client --config-path client.xml
  */
 public class Main {
     private static Set<String> algorithms = Stream.of("rf", "dt", "svm", "bst", "nn").collect(Collectors.toSet());
@@ -141,8 +143,7 @@ public class Main {
             System.out.println(">>>>>>>>>>>>>>>>>>>>>>>>> CLIENT MODE");
             igniteInstance = ignite;
             tryDestroyCache(args, ignite);
-            IgniteCache<Integer, VectorWithAswer> trainset = fillCache(args, ignite);
-            startBenchmark(args, trainset);
+            startBenchmark(args);
         }
         catch (Exception e) {
             e.printStackTrace();
@@ -208,8 +209,8 @@ public class Main {
         }
     }
 
-    private static IgniteCache<Integer, VectorWithAswer> fillCache(Args args, Ignite ignite) throws IOException {
-        System.out.println(">>>>>>>>>>>>>>>>>>>>>> CREATE AND FILL DATA_CACHE");
+    private static IgniteCache<Integer, VectorWithAswer> fillCache(Args args, Ignite ignite, double fraction, int sampleSize) {
+        System.out.println(String.format(">>>>>>>>>>>>>>>>>>>>>> CREATE AND FILL DATA_CACHE [fraction = %.4f]", fraction));
 
         CacheConfiguration<Integer, VectorWithAswer> cacheConfiguration = new CacheConfiguration<>();
         cacheConfiguration.setAffinity(new RendezvousAffinityFunction(false, 10));
@@ -217,16 +218,27 @@ public class Main {
         IgniteCache<Integer, VectorWithAswer> cache = ignite.createCache(cacheConfiguration);
 
         AtomicInteger counter = new AtomicInteger(0);
-        Files.lines(Paths.get(args.samplePath)).skip(1).forEach(line -> {
-            cache.put(counter.getAndIncrement(), new VectorWithAswer(line));
-        });
+        try {
+            Iterator<String> iter = Files.lines(Paths.get(args.samplePath)).iterator();
+            while (iter.hasNext()) {
+                String line = iter.next();
+                if(counter.get() <= fraction * sampleSize)
+                    cache.put(counter.getAndIncrement(), new VectorWithAswer(line));
+                else
+                    break;
+            }
+        }
+        catch (IOException e) {
+            e.printStackTrace();
+            System.exit(-1);
+        }
 
         return cache;
     }
 
-    private static void startBenchmark(Args args, IgniteCache<Integer, VectorWithAswer> trainset) {
+    private static void startBenchmark(Args args) {
         System.out.println(">>>>>>>>>>>>>>>>>>>>>> START BENCHMARK");
-
+        int sampleSize = computeSampleSize(args.samplePath);
         for (String trainerName : args.trainers) {
             String outputFile = args.outputFilePrefix + "_" + trainerName + ".csv";
             printHeader(outputFile);
@@ -244,18 +256,24 @@ public class Main {
                 long delta = 0L;
                 double accuracy = 0.0;
                 int retriesCount = 0;
+
+                tryDestroyCache(args, igniteInstance);
+                IgniteCache<Integer, VectorWithAswer> trainset = fillCache(args, igniteInstance, partSize, sampleSize);
+                Exception lastException = null;
                 for (int i = 0; i < COUNT_OF_ESTIMATIONS_PER_CASE; i++) {
-                    if(retriesCount > 5)
-                        throw new RuntimeException("Retries limit has exceeded");
+                    if (retriesCount > 5)
+                        throw new RuntimeException("Retries limit has exceeded", lastException);
 
                     try {
                         EstimationPair estimation = estimateModel(trainer, trainset, partSize, args);
                         delta += estimation.time;
                         accuracy += estimation.accuracy;
-                    } catch (RuntimeException e) {
+                    }
+                    catch (RuntimeException e) {
                         e.printStackTrace();
                         i--;
                         retriesCount++;
+                        lastException = e;
                     }
                 }
                 delta /= COUNT_OF_ESTIMATIONS_PER_CASE;
@@ -268,11 +286,21 @@ public class Main {
         System.out.println(">>>>>>>>>>>>>>>>>>>>>> DONE");
     }
 
+    private static int computeSampleSize(String path) {
+        try {
+            return Files.lines(Paths.get(path)).skip(1).mapToInt(line -> 1).sum();
+        } catch (IOException e) {
+            e.printStackTrace();
+            System.exit(-1);
+            return -1;
+        }
+    }
+
     private static DatasetTrainer<? extends Model<Vector, Double>, Double> createTrainer(String name) {
         switch (name) {
             case "rf":
                 return new RandomForestClassifierTrainer(
-                    900, 5,
+                    900, 30,
                     1000, 0.1, 3,
                     0.0
                 );
@@ -294,13 +322,15 @@ public class Main {
         String trainerName = trainer.getClass().getSimpleName();
         System.out.println(String.format(">>>>>>>>>>>>>>>>>>>>>> START LEARNING of %s [part size = %.4f]", trainerName, size));
 
+        final boolean isSvm = trainer instanceof SVMLinearBinaryClassificationTrainer;
+
         long startTime = System.currentTimeMillis();
         Model<Vector, Double> model = trainer.fit(
             igniteInstance,
             trainset,
             createFilter(size, args.seed, true),
             (k, v) -> v.features(),
-            (k, v) -> v.answer()
+            (k, v) -> isSvm ? (v.answer() * 2 - 1) : v.answer()
         );
         long timeDelta = System.currentTimeMillis() - startTime;
 
@@ -309,7 +339,7 @@ public class Main {
             createFilter(size, args.seed, false),
             model,
             (k, v) -> v.features(),
-            (k, v) -> v.answer(),
+            (k, v) -> isSvm ? (v.answer() * 2 - 1) : v.answer(),
             new Accuracy<>()
         );
 
@@ -318,13 +348,12 @@ public class Main {
 
     private static IgniteBiPredicate<Integer, VectorWithAswer> createFilter(double size, long seed, boolean isTrain) {
         Random rnd = new Random(seed);
-        Random shaRandom = new Random(rnd.nextInt());
-        SHA256UniformMapper<Integer, VectorWithAswer> sampleFilter = new SHA256UniformMapper<>(rnd);
-        TrainTestSplit<Integer, VectorWithAswer> split = new TrainTestDatasetSplitter<Integer, VectorWithAswer>(new SHA256UniformMapper<>(shaRandom))
+        SHA256UniformMapper<Integer, VectorWithAswer> mapper = new SHA256UniformMapper<>(rnd);
+        TrainTestSplit<Integer, VectorWithAswer> split = new TrainTestDatasetSplitter<>(mapper)
             .split(0.667);
 
         IgniteBiPredicate<Integer, VectorWithAswer> splitFilter = isTrain ? split.getTrainFilter() : split.getTestFilter();
-        return (k,v) -> sampleFilter.map(k,v) < size && splitFilter.apply(k,v);
+        return splitFilter::apply;
     }
 
     private static class EstimationPair {
@@ -348,7 +377,8 @@ public class Main {
         }
     }
 
-    private static void printEstimationResult(String outputFilename, double size, String trainerName, long timeDelta, double accuracy) {
+    private static void printEstimationResult(String outputFilename, double size, String trainerName, long timeDelta,
+        double accuracy) {
         try (FileOutputStream fos = new FileOutputStream(outputFilename, true);
              PrintWriter printer = new PrintWriter(fos)) {
 
