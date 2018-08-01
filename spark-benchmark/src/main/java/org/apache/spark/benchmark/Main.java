@@ -21,6 +21,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.ml.classification.DecisionTreeClassificationModel;
+import org.apache.spark.ml.classification.DecisionTreeClassifier;
 import org.apache.spark.ml.classification.RandomForestClassificationModel;
 import org.apache.spark.ml.classification.RandomForestClassifier;
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator;
@@ -60,6 +62,38 @@ public class Main {
         Dataset<Row> trainSet = assembler.transform(trainDataset);
         Dataset<Row> testSet = assembler.transform(testDataset);
 
+//        rfBenchmark(trainSet, testSet);
+        dtBenchmark(trainSet, testSet);
+    }
+
+    private static void dtBenchmark(Dataset<Row> trainSet, Dataset<Row> testSet) {
+        System.out.println(String.format(">>>>>>>>>>>>>>>>>>>>>> START BENCHMARK [%s mode]", "DecisionTree"));
+        long startTime = System.currentTimeMillis();
+
+        DecisionTreeClassifier trainer = new DecisionTreeClassifier()
+            .setLabelCol("TARGET")
+            .setMaxDepth(10)
+            .setMinInfoGain(0.0d);
+
+        DecisionTreeClassificationModel model = trainer.fit(trainSet);
+
+        long timeDelta = System.currentTimeMillis() - startTime;
+
+        Dataset<Row> output = model.transform(testSet);
+
+        MulticlassClassificationEvaluator evaluator = new MulticlassClassificationEvaluator()
+            .setLabelCol("TARGET")
+            .setPredictionCol("prediction")
+            .setMetricName("accuracy");
+
+        double accuracy = evaluator.evaluate(output);
+
+        System.out.println("time: " + format(timeDelta));
+        System.out.println("accuracy " + accuracy);
+    }
+
+    private static void rfBenchmark(Dataset<Row> trainSet, Dataset<Row> testSet) {
+        System.out.println(String.format(">>>>>>>>>>>>>>>>>>>>>> START BENCHMARK [%s mode]", "RandomForest"));
         long startTime = System.currentTimeMillis();
 
         RandomForestClassifier trainer = new RandomForestClassifier()
