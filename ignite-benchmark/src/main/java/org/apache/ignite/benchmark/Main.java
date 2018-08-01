@@ -44,8 +44,8 @@ import org.apache.ignite.ml.environment.LearningEnvironment;
 import org.apache.ignite.ml.environment.logging.ConsoleLogger;
 import org.apache.ignite.ml.environment.logging.MLLogger;
 import org.apache.ignite.ml.environment.parallelism.ParallelismStrategy;
-import org.apache.ignite.ml.math.Vector;
-import org.apache.ignite.ml.math.VectorUtils;
+import org.apache.ignite.ml.math.primitives.vector.Vector;
+import org.apache.ignite.ml.math.primitives.vector.VectorUtils;
 import org.apache.ignite.ml.selection.scoring.evaluator.Evaluator;
 import org.apache.ignite.ml.selection.scoring.metric.Accuracy;
 import org.apache.ignite.ml.selection.split.TrainTestDatasetSplitter;
@@ -54,8 +54,14 @@ import org.apache.ignite.ml.selection.split.mapper.SHA256UniformMapper;
 import org.apache.ignite.ml.svm.SVMLinearBinaryClassificationTrainer;
 import org.apache.ignite.ml.trainers.DatasetTrainer;
 import org.apache.ignite.ml.tree.DecisionTreeClassificationTrainer;
+import org.apache.ignite.ml.tree.DecisionTreeNode;
+import org.apache.ignite.ml.tree.DecisionTreeRegressionTrainer;
 import org.apache.ignite.ml.tree.boosting.GDBBinaryClassifierOnTreesTrainer;
+import org.apache.ignite.ml.tree.impurity.gini.GiniImpurityMeasure;
+import org.apache.ignite.ml.tree.impurity.util.SimpleStepFunctionCompressor;
+import org.apache.ignite.ml.tree.impurity.util.StepFunction;
 import org.apache.ignite.ml.tree.randomforest.RandomForestClassifierTrainer;
+import org.jetbrains.annotations.NotNull;
 
 /**
  * Running examples: nohup /usr/lib/jvm/java-8-oracle/bin/java -jar main.jar --dataset homecredit_top10k.csv
@@ -122,6 +128,9 @@ public class Main {
 
         @Parameter(names = {"--mode", "-m"}, description = "benchmark tool mode [client or server]", required = true)
         private String mode = "client";
+
+        @Parameter(names = {"--benchmark-mode", "-bm"}, description = "benchmark tool mode [client or server]", required = false)
+        private String benchmarkMode = "base";
 
         @Parameter(names = {"--help", "-h"}, help = true)
         private boolean help = false;
@@ -209,21 +218,22 @@ public class Main {
         }
     }
 
-    private static IgniteCache<Integer, VectorWithAswer> fillCache(Args args, Ignite ignite, double fraction, int sampleSize) {
+    private static IgniteCache<Integer, VectorWithAnswer> fillCache(Args args, Ignite ignite, double fraction,
+        int sampleSize) {
         System.out.println(String.format(">>>>>>>>>>>>>>>>>>>>>> CREATE AND FILL DATA_CACHE [fraction = %.4f]", fraction));
 
-        CacheConfiguration<Integer, VectorWithAswer> cacheConfiguration = new CacheConfiguration<>();
+        CacheConfiguration<Integer, VectorWithAnswer> cacheConfiguration = new CacheConfiguration<>();
         cacheConfiguration.setAffinity(new RendezvousAffinityFunction(false, 10));
         cacheConfiguration.setName(args.cacheName);
-        IgniteCache<Integer, VectorWithAswer> cache = ignite.createCache(cacheConfiguration);
+        IgniteCache<Integer, VectorWithAnswer> cache = ignite.createCache(cacheConfiguration);
 
         AtomicInteger counter = new AtomicInteger(0);
         try {
             Iterator<String> iter = Files.lines(Paths.get(args.samplePath)).iterator();
             while (iter.hasNext()) {
                 String line = iter.next();
-                if(counter.get() <= fraction * sampleSize)
-                    cache.put(counter.getAndIncrement(), new VectorWithAswer(line));
+                if (counter.get() <= fraction * sampleSize)
+                    cache.put(counter.getAndIncrement(), new VectorWithAnswer(line));
                 else
                     break;
             }
@@ -237,18 +247,53 @@ public class Main {
     }
 
     private static void startBenchmark(Args args) {
-        System.out.println(">>>>>>>>>>>>>>>>>>>>>> START BENCHMARK");
+        System.out.println(String.format(">>>>>>>>>>>>>>>>>>>>>> START BENCHMARK [%s mode]", args.benchmarkMode));
+        switch (args.benchmarkMode) {
+            case "base":
+                baseBenchmark(args);
+                break;
+            case "dts":
+                decisionTreesBenchmark(args);
+                break;
+        }
+    }
+
+    private static void decisionTreesBenchmark(Args args) {
+        tryDestroyCache(args, igniteInstance);
+        int sampleSize = computeSampleSize(args.samplePath);
+        IgniteCache<Integer, VectorWithAnswer> trainset = fillCache(args, igniteInstance, 1.0, sampleSize);
+
+        String outputFile = args.outputFilePrefix + "_dts.csv";
+        printHeader(outputFile);
+        DatasetTrainer<? extends Model<Vector, Double>, Double> trainer = new DecisionTreeClassificationTrainer(
+            5, 0.0
+        );
+
+        EstimationPair estimation = estimateModel(trainer, trainset, 1.0, args);
+        printEstimationResult(outputFile, 1.0, "base", estimation.time, estimation.accuracy);
+
+        for (double minImpIncrease = 0.05; minImpIncrease <= 1.0; minImpIncrease *= 2) {
+            for (double minImpDecrease = 0.05; minImpDecrease <= 1.0; minImpDecrease *= 2) {
+//                for (int minCount = 10; minCount <= 1010; minCount += 100) {
+                trainer = new DecisionTreeClassificationTrainer(5, 0.0,
+                    new SimpleStepFunctionCompressor<GiniImpurityMeasure>(10, minImpIncrease, minImpDecrease));
+
+                estimation = estimateModel(trainer, trainset, 1.0, args);
+                String name = String.format("dt_%d_%.4f_%.4f", 10, minImpIncrease, minImpDecrease);
+                printEstimationResult(outputFile, 1.0, name, estimation.time, estimation.accuracy);
+                return;
+            }
+        }
+//        }
+    }
+
+    private static void baseBenchmark(Args args) {
         int sampleSize = computeSampleSize(args.samplePath);
         for (String trainerName : args.trainers) {
             String outputFile = args.outputFilePrefix + "_" + trainerName + ".csv";
             printHeader(outputFile);
 
             DatasetTrainer<? extends Model<Vector, Double>, Double> trainer = createTrainer(trainerName);
-            trainer.setEnvironment(LearningEnvironment.builder()
-                .withParallelismStrategy(ParallelismStrategy.Type.ON_DEFAULT_POOL)
-                .withLoggingFactory(ConsoleLogger.factory(MLLogger.VerboseLevel.MID))
-                .build());
-
             for (double partSize = args.sampleStartSize;
                 partSize <= args.sampleEndSize;
                 partSize += args.sampleSizeStep) {
@@ -258,7 +303,7 @@ public class Main {
                 int retriesCount = 0;
 
                 tryDestroyCache(args, igniteInstance);
-                IgniteCache<Integer, VectorWithAswer> trainset = fillCache(args, igniteInstance, partSize, sampleSize);
+                IgniteCache<Integer, VectorWithAnswer> trainset = fillCache(args, igniteInstance, partSize, sampleSize);
                 Exception lastException = null;
                 for (int i = 0; i < COUNT_OF_ESTIMATIONS_PER_CASE; i++) {
                     if (retriesCount > 5)
@@ -289,7 +334,8 @@ public class Main {
     private static int computeSampleSize(String path) {
         try {
             return Files.lines(Paths.get(path)).skip(1).mapToInt(line -> 1).sum();
-        } catch (IOException e) {
+        }
+        catch (IOException e) {
             e.printStackTrace();
             System.exit(-1);
             return -1;
@@ -297,26 +343,54 @@ public class Main {
     }
 
     private static DatasetTrainer<? extends Model<Vector, Double>, Double> createTrainer(String name) {
+        LearningEnvironment learningEnvironment = LearningEnvironment.builder()
+            .withParallelismStrategy(ParallelismStrategy.Type.ON_DEFAULT_POOL)
+            .withLoggingFactory(ConsoleLogger.factory(MLLogger.VerboseLevel.HIGH))
+            .build();
+
+        DatasetTrainer<? extends Model<Vector, Double>, Double> trainer = null;
         switch (name) {
             case "rf":
-                return new RandomForestClassifierTrainer(
+                trainer = new RandomForestClassifierTrainer(
                     900, 30,
                     1000, 0.1, 3,
                     0.0
-                );
+                ) {
+                    @Override protected DatasetTrainer<DecisionTreeNode, Double> buildDatasetTrainerForModel() {
+                        DatasetTrainer<DecisionTreeNode, Double> internalTrainer = super.buildDatasetTrainerForModel();
+//                        internalTrainer.setEnvironment(learningEnvironment);
+                        return internalTrainer;
+                    }
+                };
+                break;
             case "dt":
-                return new DecisionTreeClassificationTrainer(10, 0.0);
+                trainer = new DecisionTreeClassificationTrainer(10, 0.0, new SimpleStepFunctionCompressor<>());
+                break;
             case "bst":
-                return new GDBBinaryClassifierOnTreesTrainer(1.0, 500, 1, 0.0);
+                trainer = new GDBBinaryClassifierOnTreesTrainer(1.0, 500, 1, 0.0) {
+                    @NotNull @Override
+                    protected DatasetTrainer<? extends Model<Vector, Double>, Double> buildBaseModelTrainer() {
+                        DecisionTreeRegressionTrainer dt = new DecisionTreeRegressionTrainer(1, 0.0, new SimpleStepFunctionCompressor<>(
+                            10, 1.0, 0.5
+                        ));
+//                        dt.setEnvironment(learningEnvironment);
+                        return dt;
+                    }
+                };
+                break;
             case "svm":
-                return new SVMLinearBinaryClassificationTrainer();
+                trainer = new SVMLinearBinaryClassificationTrainer();
+                break;
             default:
                 throw new IllegalArgumentException(name);
         }
+
+//        trainer.setEnvironment(learningEnvironment);
+        return trainer;
     }
 
     private static EstimationPair estimateModel(DatasetTrainer<? extends Model<Vector, Double>, Double> trainer,
-        IgniteCache<Integer, VectorWithAswer> trainset,
+        IgniteCache<Integer, VectorWithAnswer> trainset,
         double size, Args args) {
 
         String trainerName = trainer.getClass().getSimpleName();
@@ -346,13 +420,13 @@ public class Main {
         return new EstimationPair(timeDelta, accuracy);
     }
 
-    private static IgniteBiPredicate<Integer, VectorWithAswer> createFilter(double size, long seed, boolean isTrain) {
+    private static IgniteBiPredicate<Integer, VectorWithAnswer> createFilter(double size, long seed, boolean isTrain) {
         Random rnd = new Random(seed);
-        SHA256UniformMapper<Integer, VectorWithAswer> mapper = new SHA256UniformMapper<>(rnd);
-        TrainTestSplit<Integer, VectorWithAswer> split = new TrainTestDatasetSplitter<>(mapper)
+        SHA256UniformMapper<Integer, VectorWithAnswer> mapper = new SHA256UniformMapper<>(rnd);
+        TrainTestSplit<Integer, VectorWithAnswer> split = new TrainTestDatasetSplitter<>(mapper)
             .split(0.667);
 
-        IgniteBiPredicate<Integer, VectorWithAswer> splitFilter = isTrain ? split.getTrainFilter() : split.getTestFilter();
+        IgniteBiPredicate<Integer, VectorWithAnswer> splitFilter = isTrain ? split.getTrainFilter() : split.getTestFilter();
         return splitFilter::apply;
     }
 
@@ -395,11 +469,11 @@ public class Main {
         }
     }
 
-    public static class VectorWithAswer {
+    public static class VectorWithAnswer {
         private final double[] features;
         private final double answer;
 
-        public VectorWithAswer(String line) {
+        public VectorWithAnswer(String line) {
             String[] split = line.split(",");
             answer = Double.valueOf(split[split.length - 1]);
 
@@ -408,7 +482,7 @@ public class Main {
                 features[i] = Double.valueOf(split[i]);
         }
 
-        public VectorWithAswer(double[] features, double answer) {
+        public VectorWithAnswer(double[] features, double answer) {
             this.features = features;
             this.answer = answer;
         }

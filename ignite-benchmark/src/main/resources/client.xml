@@ -14,8 +14,10 @@
                         <property name="addresses">
                             <list>
                                 <value>172.25.1.11:47500..47509</value>
-                                <value>172.25.1.13:47500..47509</value>
-                                <value>172.25.1.45:47500..47509</value>
+                                <!--<value>172.25.1.13:47500..47509</value>-->
+                                <value>172.25.1.35:47500..47509</value>
+                                <value>172.25.1.36:47500..47509</value>
+                                <!--<value>172.25.1.45:47500..47509</value>-->
                             </list>
                         </property>
                     </bean>
