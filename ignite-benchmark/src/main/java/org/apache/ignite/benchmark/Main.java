@@ -59,7 +59,6 @@ import org.apache.ignite.ml.tree.DecisionTreeRegressionTrainer;
 import org.apache.ignite.ml.tree.boosting.GDBBinaryClassifierOnTreesTrainer;
 import org.apache.ignite.ml.tree.impurity.gini.GiniImpurityMeasure;
 import org.apache.ignite.ml.tree.impurity.util.SimpleStepFunctionCompressor;
-import org.apache.ignite.ml.tree.impurity.util.StepFunction;
 import org.apache.ignite.ml.tree.randomforest.RandomForestClassifierTrainer;
 import org.jetbrains.annotations.NotNull;
 
@@ -74,6 +73,9 @@ public class Main {
     private static final long COUNT_OF_ESTIMATIONS_PER_CASE = 3;
 
     public static class Args {
+        @Parameter(names = {"-wd", "--workdir"})
+        public String workingDir;
+
         /** Spring configuration path. */
         @Parameter(names = {"--config-path"}, required = true)
         public String configurationPath;
@@ -82,7 +84,7 @@ public class Main {
         @Parameter(names = {"--dataset", "-i"},
             required = true,
             description = "path to binary classification dataset in csv format")
-        private String samplePath = "";
+        private String sampleFilename = "";
 
         /** Cache name. */
         @Parameter(names = {"--cache-name"})
@@ -96,7 +98,7 @@ public class Main {
         /** Sample end size  in percents of original sample size. */
         @Parameter(names = {"--sample-end-size"},
             description = "Sample end size  in percents of original sample size")
-        private double sampleEndSize = 1.0;
+        private double sampleEndSize = 0.1;
 
         /** Sample partition size will be increased by this value in each iteration. */
         @Parameter(names = {"--sample-size-step"},
@@ -188,8 +190,12 @@ public class Main {
     private static void normalizeArgs(Args args) {
         if (args.trainers.isEmpty())
             throw new IllegalArgumentException("Trainers list cannot be empty");
-        args.trainers = args.trainers.stream().filter(x -> algorithms.contains(x)).collect(Collectors.toList());
+        args.trainers = args.trainers.stream()
+            .filter(x -> algorithms.contains(x)).distinct()
+            .filter(x -> !x.isEmpty())
+            .collect(Collectors.toList());
 
+        assert !args.trainers.isEmpty();
         switch (args.configurationName) {
             case "":
                 args.sampleStartSize = Math.max(0.0, Math.min(1.0, args.sampleStartSize));
@@ -229,7 +235,7 @@ public class Main {
 
         AtomicInteger counter = new AtomicInteger(0);
         try {
-            Iterator<String> iter = Files.lines(Paths.get(args.samplePath)).iterator();
+            Iterator<String> iter = Files.lines(Paths.get(args.workingDir).resolve(args.sampleFilename)).skip(1).iterator();
             while (iter.hasNext()) {
                 String line = iter.next();
                 if (counter.get() <= fraction * sampleSize)
@@ -260,7 +266,7 @@ public class Main {
 
     private static void decisionTreesBenchmark(Args args) {
         tryDestroyCache(args, igniteInstance);
-        int sampleSize = computeSampleSize(args.samplePath);
+        int sampleSize = computeSampleSize(args);
         IgniteCache<Integer, VectorWithAnswer> trainset = fillCache(args, igniteInstance, 1.0, sampleSize);
 
         String outputFile = args.outputFilePrefix + "_dts.csv";
@@ -269,7 +275,7 @@ public class Main {
             5, 0.0
         );
 
-        EstimationPair estimation = estimateModel(trainer, trainset, 1.0, args);
+        EstimationPair estimation = estimateModel(trainer, trainset, "df", 1.0, args);
         printEstimationResult(outputFile, 1.0, "base", estimation.time, estimation.accuracy);
 
         for (double minImpIncrease = 0.05; minImpIncrease <= 1.0; minImpIncrease *= 2) {
@@ -278,7 +284,7 @@ public class Main {
                 trainer = new DecisionTreeClassificationTrainer(5, 0.0,
                     new SimpleStepFunctionCompressor<GiniImpurityMeasure>(10, minImpIncrease, minImpDecrease));
 
-                estimation = estimateModel(trainer, trainset, 1.0, args);
+                estimation = estimateModel(trainer, trainset, "df", 1.0, args);
                 String name = String.format("dt_%d_%.4f_%.4f", 10, minImpIncrease, minImpDecrease);
                 printEstimationResult(outputFile, 1.0, name, estimation.time, estimation.accuracy);
                 return;
@@ -288,9 +294,9 @@ public class Main {
     }
 
     private static void baseBenchmark(Args args) {
-        int sampleSize = computeSampleSize(args.samplePath);
+        int sampleSize = computeSampleSize(args);
         for (String trainerName : args.trainers) {
-            String outputFile = args.outputFilePrefix + "_" + trainerName + ".csv";
+            String outputFile = Paths.get(args.workingDir).resolve(args.outputFilePrefix + "_" + trainerName + ".csv").toString();
             printHeader(outputFile);
 
             DatasetTrainer<? extends Model<Vector, Double>, Double> trainer = createTrainer(trainerName);
@@ -310,7 +316,7 @@ public class Main {
                         throw new RuntimeException("Retries limit has exceeded", lastException);
 
                     try {
-                        EstimationPair estimation = estimateModel(trainer, trainset, partSize, args);
+                        EstimationPair estimation = estimateModel(trainer, trainset, trainerName, partSize, args);
                         delta += estimation.time;
                         accuracy += estimation.accuracy;
                     }
@@ -331,9 +337,9 @@ public class Main {
         System.out.println(">>>>>>>>>>>>>>>>>>>>>> DONE");
     }
 
-    private static int computeSampleSize(String path) {
+    private static int computeSampleSize(Args args) {
         try {
-            return Files.lines(Paths.get(path)).skip(1).mapToInt(line -> 1).sum();
+            return Files.lines(Paths.get(args.workingDir).resolve(args.sampleFilename)).skip(1).mapToInt(line -> 1).sum();
         }
         catch (IOException e) {
             e.printStackTrace();
@@ -390,11 +396,10 @@ public class Main {
     }
 
     private static EstimationPair estimateModel(DatasetTrainer<? extends Model<Vector, Double>, Double> trainer,
-        IgniteCache<Integer, VectorWithAnswer> trainset,
+        IgniteCache<Integer, VectorWithAnswer> trainset, String trainerName,
         double size, Args args) {
 
-        String trainerName = trainer.getClass().getSimpleName();
-        System.out.println(String.format(">>>>>>>>>>>>>>>>>>>>>> START LEARNING of %s [part size = %.4f]", trainerName, size));
+        System.out.print(String.format(">>>>>>>>>>>>>>>>>>>>>> START LEARNING of %s [part size = %.4f]", trainerName, size));
 
         final boolean isSvm = trainer instanceof SVMLinearBinaryClassificationTrainer;
 
@@ -416,6 +421,8 @@ public class Main {
             (k, v) -> isSvm ? (v.answer() * 2 - 1) : v.answer(),
             new Accuracy<>()
         );
+
+        System.out.println(String.format(" [time delta = %d ms; accuracy = %.4f]", timeDelta, accuracy));
 
         return new EstimationPair(timeDelta, accuracy);
     }
