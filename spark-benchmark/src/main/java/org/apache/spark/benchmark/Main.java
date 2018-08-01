@@ -17,24 +17,17 @@
 
 package org.apache.spark.benchmark;
 
-import java.util.HashMap;
-import java.util.Map;
-
+import java.util.concurrent.TimeUnit;
+import java.util.stream.IntStream;
+import org.apache.spark.SparkConf;
+import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.ml.classification.RandomForestClassificationModel;
 import org.apache.spark.ml.classification.RandomForestClassifier;
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator;
 import org.apache.spark.ml.feature.VectorAssembler;
-import org.apache.spark.ml.tree.impl.RandomForest;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
-import org.apache.spark.sql.SQLContext;
 import org.apache.spark.sql.SparkSession;
-import scala.Tuple2;
-
-import org.apache.spark.api.java.JavaPairRDD;
-import org.apache.spark.api.java.JavaRDD;
-import org.apache.spark.api.java.JavaSparkContext;
-import org.apache.spark.SparkConf;
 
 /**
  * TODO: add description.
@@ -46,10 +39,10 @@ public class Main {
 
         JavaSparkContext jsc = new JavaSparkContext(sparkConf);
 // Load and parse the data file.
-        String datapath = "/home/ybabak/Downloads/homecredit_all.csv";
+        String datapath = "/home/ybabak/Downloads/homecredit_with_column_numbers.csv";
         SparkSession sparkSession = SparkSession.builder().appName("JavaRandomForestClassificationExample").getOrCreate();
-        final Dataset<Row> ds = sparkSession.read().option("header", true).option("inferSchema", "true").csv(datapath);
 
+        final Dataset<Row> ds = sparkSession.read().option("header", true).option("inferSchema", "true").csv(datapath);
         Dataset<Row>[] datasets = ds.randomSplit(new double[] {0.6, 0.4});
 
         Dataset<Row> trainDataset = datasets[0];
@@ -58,19 +51,24 @@ public class Main {
         Dataset<Row> testDataset = datasets[1];
         testDataset.cache();
 
-        ds.printSchema();
+        String[] featureNames = IntStream.rangeClosed(1, 901).<String>mapToObj(String::valueOf).toArray(String[]::new);
 
-
-        // Step - 1: Make Vectors from dataframe's columns using special Vector Assmebler
         VectorAssembler assembler = new VectorAssembler()
-            .setInputCols(new String[]{"REG_REGION_NOT_LIVE_REGION"})
+            .setInputCols(featureNames)
             .setOutputCol("features");
 
         Dataset<Row> trainSet = assembler.transform(trainDataset);
         Dataset<Row> testSet = assembler.transform(testDataset);
 
+        long startTime = System.currentTimeMillis();
+
         RandomForestClassifier trainer = new RandomForestClassifier()
-            .setLabelCol("TARGET");
+            .setLabelCol("TARGET")
+            .setMaxDepth(3)
+            .setNumTrees(1000)
+            .setMinInfoGain(0.0d)
+            .setSubsamplingRate(0.1)
+            .setFeatureSubsetStrategy("sqrt");
         RandomForestClassificationModel model = trainer.fit(trainSet);
 
         Dataset<Row> output = model.transform(testSet);
@@ -81,6 +79,19 @@ public class Main {
             .setMetricName("accuracy");
 
         double accuracy = evaluator.evaluate(output);
-        System.out.println(accuracy);
+
+        long timeDelta = System.currentTimeMillis() - startTime;
+
+        System.out.println("time: " + format(timeDelta));
+        System.out.println("accuracy " + accuracy);
+    }
+
+    private static String format(long millis){
+        return String.format("%02d:%02d:%02d",
+            TimeUnit.MILLISECONDS.toHours(millis),
+            TimeUnit.MILLISECONDS.toMinutes(millis) -
+                TimeUnit.HOURS.toMinutes(TimeUnit.MILLISECONDS.toHours(millis)), // The change is in this line
+            TimeUnit.MILLISECONDS.toSeconds(millis) -
+                TimeUnit.MINUTES.toSeconds(TimeUnit.MILLISECONDS.toMinutes(millis)));
     }
 }
