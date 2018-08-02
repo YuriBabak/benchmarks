@@ -17,8 +17,10 @@
 
 package org.apache.spark.benchmark;
 
+import com.google.common.collect.Sets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 import org.apache.spark.SparkConf;
@@ -30,6 +32,8 @@ import org.apache.spark.ml.classification.GBTClassificationModel;
 import org.apache.spark.ml.classification.GBTClassifier;
 import org.apache.spark.ml.classification.LinearSVC;
 import org.apache.spark.ml.classification.LinearSVCModel;
+import org.apache.spark.ml.classification.LogisticRegression;
+import org.apache.spark.ml.classification.LogisticRegressionModel;
 import org.apache.spark.ml.classification.RandomForestClassificationModel;
 import org.apache.spark.ml.classification.RandomForestClassifier;
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator;
@@ -42,6 +46,15 @@ import org.apache.spark.sql.SparkSession;
  * TODO: add description.
  */
 public class Main {
+    private static Set<String> algorithms = Sets.newHashSet(
+        "rf"
+        ,"dt"
+        ,"svm"
+        ,"gdb"
+//        ,"log"
+//        ,"nn"
+    );
+
     /** Path to dataset. */
     private static String datapath = "/home/ybabak/Downloads/homecredit_with_column_numbers.csv";
 
@@ -80,10 +93,22 @@ public class Main {
 
         results = new HashMap<>();
 
-//        rfBenchmark(trainSet, testSet);
-//        dtBenchmark(trainSet, testSet);
-        gdbBenchmark(trainSet, testSet);
-        svmBenchmark(trainSet, testSet);
+        algorithms.forEach(alg ->{
+            switch (alg) {
+                case "rf" :
+                    rfBenchmark(trainSet, testSet);
+                    break;
+                case "dt" :
+                    dtBenchmark(trainSet, testSet);
+                    break;
+                case "svm":
+                    svmBenchmark(trainSet, testSet);
+                    break;
+                case "gdb" :
+                    gdbBenchmark(trainSet, testSet);
+                    break;
+            }
+        });
 
         System.out.println(">>>>>>>>>>>>>>>>>>>>>> RESULTS:");
 
@@ -93,6 +118,38 @@ public class Main {
             System.out.println("accuracy " + v.accuracy);
         });
     }
+
+    /**
+     * LogisticRegression benchmark.
+     *
+     * @param trainSet Train set.
+     * @param testSet Test set.
+     */
+    private static void logBenchmark(Dataset<Row> trainSet, Dataset<Row> testSet) {
+        System.out.println(String.format(">>>>>>>>>>>>>>>>>>>>>> START BENCHMARK [%s mode]", "LOG_REG"));
+        long startTime = System.currentTimeMillis();
+        LogisticRegression trainer = new LogisticRegression()
+            .setLabelCol("TARGET");
+
+        LogisticRegressionModel mdl = trainer.fit(trainSet);
+
+        long timeDelta = System.currentTimeMillis() - startTime;
+
+        evaluateModel(mdl, timeDelta, testSet);
+    }
+
+//    private static void nnBenchmark(Dataset<Row> trainSet, Dataset<Row> testSet) {
+//        System.out.println(String.format(">>>>>>>>>>>>>>>>>>>>>> START BENCHMARK [%s mode]", "MLP"));
+//        long startTime = System.currentTimeMillis();
+//        MultilayerPerceptronClassifier trainer = new MultilayerPerceptronClassifier()
+//            .setLabelCol("TARGET");
+//
+//        MultilayerPerceptronClassificationModel mdl = trainer.fit(trainSet);
+//
+//        long timeDelta = System.currentTimeMillis() - startTime;
+//
+//        evaluateModel(mdl, timeDelta, testSet);
+//    }
 
     /**
      * SVM benchmark.
